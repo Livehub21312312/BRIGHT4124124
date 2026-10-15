@@ -1,0 +1,9 @@
+# Install the CUDA-specific torch/torchvision wheels separately; see
+# README_REPRODUCTION.md.  NumPy 1.26 keeps compatibility with PyTorch 2.2.1
+# and matplotlib 3.8.3, unlike the NumPy 2.2.1 pin in requirements.txt.
+imageio==2.34.0
+matplotlib==3.8.3
+numpy==1.26.4
+Pillow==11.1.0
+tqdm==4.66.2
+opencv-python-headless==4.11.0.86
