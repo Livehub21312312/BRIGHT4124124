@@ -79,7 +79,8 @@ damaged、destroyed 三个 F1 的调和平均；OA、逐类 IoU 和 mIoU 使用�
 论文中的 Ukraine、Myanmar、Mexico 因灾前光学影像不能再分发而显示为 `–`。
 当前 `standard_ML` 列表还包含后来加入的 `noto-earthquake`、
 `marshall-wildfire`，以及需要用户自行准备光学数据的 Ukraine、Myanmar、Mexico，
-总数为 2917/449/877；直接使用它们不是论文表 4 的同一测试范围。
+非空条目总数为 2918/450/878；直接使用它们不是论文表 4 的同一测试范围。不要用
+`wc -l` 统计这些没有末尾换行的文件，否则会各少算 1。
 
 更重要的是，仓库最早公开的论文期列表（提交 `c0032ed`）有两个跨集合重复项：
 `bata-explosion_00000049` 同时在 train/test，`libya-flood_00000024` 同时在
@@ -144,6 +145,55 @@ SAR/标签是二维数组、标签唯一值属于 `{0,1,2,3}`。不要重采样�
 当前 `infer_UNet.py` 要求 key 不带 `module.` 前缀，并且首层/末层应分别兼容
 `[64, 6, 3, 3]` 和 `[4, 64, 1, 1]`。从 Zenodo 页面记录实际文件名、文件大小、
 版本和 checksum；官方 README 没有把这些元数据写进仓库，不能凭名称猜测。
+
+### Windows 上检查真实数据完整性
+
+解压后应直接形成以下结构，不要多套一层同名目录：
+
+```text
+D:\BRIGHT-Reproduction\data\
+├── pre-event\
+├── post-event\
+└── target\
+```
+
+在 PowerShell 中进入包含本仓库的目录，激活已安装 `requirements-reproduction.txt`
+的 Python 3.10 环境，然后运行：
+
+```powershell
+Set-Location 'D:\BRIGHT-Reproduction\BRIGHT'
+python .\tools\check_bright_dataset.py `
+  --dataset-root 'D:\BRIGHT-Reproduction\data' `
+  --output-dir 'D:\BRIGHT-Reproduction\reports' `
+  --workers 4
+$LASTEXITCODE
+```
+
+脚本按官方后缀而不是文件总数配对样本，逐个读取 TIFF，并检查尺寸、波段、dtype、
+标签取值、标准划分引用、9 事件计数和跨 split 重复。它会生成：
+
+- `D:\BRIGHT-Reproduction\reports\dataset_check_report.json`：完整汇总、逐事件缺失、
+  未匹配文件、split 重复和每个样本的元数据；
+- `D:\BRIGHT-Reproduction\reports\dataset_check_report.csv`：每个样本一行，使用
+  UTF-8 BOM，便于 Excel 打开和筛选 `error_codes`。
+
+退出码 `0` 表示无完整性错误（可能仍有警告），`1` 表示发现缺失、不可读、尺寸/波段/
+标签错误、计数不符或 split 重复；即使返回 `1`，两个报告仍会写出。默认要求
+1024×1024；仅在有意检查非官方裁剪时才传 `--expected-size 0`。脚本只读数据，不会
+改名、移动、解压或重写任何 TIFF/划分文件。
+
+如果 Windows 电脑上的仓库使用本项目配置的远端，可用以下命令同步复现分支：
+
+```powershell
+Set-Location 'D:\BRIGHT-Reproduction\BRIGHT'
+git fetch origin
+# 第一次检出时：
+git switch --track origin/repro/essd-unet-baseline
+# 已有本地分支时改用：git switch repro/essd-unet-baseline
+git pull --ff-only origin repro/essd-unet-baseline
+```
+
+若本地仓库有未提交修改，先保存或提交它们，不要用 `reset --hard` 覆盖。
 
 ## 5. Linux GPU 环境
 
