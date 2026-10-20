@@ -1,0 +1,4 @@
+# Local artifacts produced by the reproduction helpers.
+/checkpoints/
+/outputs/
+/reports/
