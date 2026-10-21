@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""Run a short, real-data UNet training smoke test on the historical 9 events.
+"""Run an auxiliary UNet training smoke test on the historical 9 events.
 
 This is an independent Windows-compatible wrapper around the repository's
-unmodified Dataset, UNet, and Lovasz implementations.  It validates the three
-official split files, selects only a small training subset, and checks that the
-official loss can run forward, backward, and update parameters.  It never
-reads validation/test TIFFs and it is not a full training entry point.
+unmodified Dataset, UNet, and Lovasz implementations.  It validates only the
+training and validation ID lists, selects a small training subset, and checks
+that the official loss can run forward, backward, and update parameters.  It
+does not accept or open the test list, reads no validation TIFFs, and is not a
+full training entry point.
+It is not the default ESSD 2025 final-paper reproduction smoke test; use
+smoke_train_unet_standard_ml.py for the 14-event standard_ML main experiment.
 """
 
 from __future__ import annotations
@@ -44,7 +47,7 @@ from util_func import lovasz_loss as L  # noqa: E402
 
 
 SPLIT_ROOT = BASELINE_ROOT / "dataset" / "splitname" / "standard_ML"
-EXPECTED_PAPER9_COUNTS = {"train": 2229, "val": 349, "test": 661}
+EXPECTED_PAPER9_COUNTS = {"train": 2229, "val": 349}
 
 
 def parse_args() -> argparse.Namespace:
@@ -71,12 +74,6 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=SPLIT_ROOT / "val_set.txt",
         help="Official standard_ML validation list (IDs only; TIFFs are not read).",
-    )
-    parser.add_argument(
-        "--test-list",
-        type=Path,
-        default=SPLIT_ROOT / "test_set.txt",
-        help="Official standard_ML test list (IDs only; TIFFs are not read).",
     )
     parser.add_argument("--steps", type=int, default=2)
     parser.add_argument("--sample-limit", type=int, default=8)
@@ -134,7 +131,6 @@ def validate_splits(args: argparse.Namespace) -> dict[str, list[str]]:
     for name, path in (
         ("train", args.train_list),
         ("val", args.val_list),
-        ("test", args.test_list),
     ):
         paper9_ids = select_paper9(read_ids(path))
         expected = EXPECTED_PAPER9_COUNTS[name]
@@ -144,10 +140,9 @@ def validate_splits(args: argparse.Namespace) -> dict[str, list[str]]:
             )
         selected[name] = paper9_ids
 
-    for left, right in (("train", "val"), ("train", "test"), ("val", "test")):
-        overlap = sorted(set(selected[left]) & set(selected[right]))
-        if overlap:
-            raise ValueError(f"{left}/{right} overlap: {overlap[:10]}")
+    overlap = sorted(set(selected["train"]) & set(selected["val"]))
+    if overlap:
+        raise ValueError(f"train/val overlap: {overlap[:10]}")
     return selected
 
 
@@ -299,6 +294,7 @@ def main() -> int:
 
     report: dict[str, Any] = {
         "status": "passed",
+        "experiment_role": "auxiliary_historical_nine_event_experiment",
         "scope": (
             "real-data training smoke test only; not a paper result and not a "
             "completed training run"
@@ -318,15 +314,15 @@ def main() -> int:
                 for name, path in (
                     ("train", args.train_list),
                     ("val", args.val_list),
-                    ("test", args.test_list),
                 )
             },
-            "overlap_count": 0,
+            "train_val_overlap_count": 0,
             "training_triplets_existence_checked": len(smoke_ids),
             "training_samples_loaded": sum(
                 len(step_report["sample_ids"]) for step_report in step_reports
             ),
             "validation_tiffs_read": 0,
+            "test_list_accessed": False,
             "test_tiffs_read": 0,
         },
         "configuration": {

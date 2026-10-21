@@ -1,6 +1,8 @@
-# BRIGHT UNet 基线核对与 9 事件训练准备
+# BRIGHT UNet 历史 9 事件辅助实验计划
 
-> 状态：仅完成论文/源码审查、派生划分工具和训练烟测工具；未启动正式训练，也未在本仓库环境冒充执行 Windows 真实数据训练烟测。
+> 实验角色：仅作为已有辅助实验保留，不再是 ESSD 2025 正式论文复现的默认训练配置。14 事件主线见 `STRICT_STANDARD_ML_REPRODUCTION_PLAN.md`。不要把本文件的 2229/349/661 结果与正式 2918/450/878 实验混合。
+>
+> 状态：仅完成论文/源码审查、派生划分工具和训练烟测工具；未启动正式训练，也未在本仓库环境冒充执行 Windows 真实数据训练烟测。已有 9 事件预测、报告和派生列表必须保留。
 
 ## 1. 先明确版本口径
 
@@ -98,14 +100,14 @@ Zenodo：https://zenodo.org/api/records/15349462/files/ckpt_UNet_standard_ML_spl
 
 ## 3. 两条复现实验轨道
 
-### 轨道 A：ESSD 2025 最终论文基线（推荐的最终目标）
+### 轨道 A：ESSD 2025 最终论文基线（正式主线）
 
 - 直接使用当前官方 14 事件列表：2918/450/878。
 - batch 16、crop 640、AdamW、lr `1e-4`、weight decay `5e-3`、50000 optimizer updates。
 - 为复现“代码基线”，损失保留 `CE + 0.75 Lovasz`；报告中同时披露论文公式写作 `CE + Lovasz`。
 - validation 每 500 updates；只按 validation mIoU 选模；测试集在 best checkpoint 冻结后只运行一次。
 
-### 轨道 B：历史 9 事件严格隔离实验（当前任务）
+### 轨道 B：历史 9 事件严格隔离实验（辅助实验）
 
 - 从当前列表按固定 9 个事件筛选，保留原顺序，得到 2229/349/661。
 - 不改官方列表；用 `tools/prepare_paper9_splits.py` 在 `outputs/paper9_splits` 生成派生列表及 SHA-256 manifest。
@@ -137,7 +139,7 @@ python -m pip freeze | Out-File -Encoding utf8 .\outputs\environment-pip-freeze.
 nvidia-smi | Out-File -Encoding utf8 .\outputs\environment-nvidia-smi.txt
 ```
 
-## 5. 先生成并核对派生 9 事件列表
+## 5. 辅助实验需要时才生成派生 9 事件列表
 
 ```powershell
 Set-Location 'D:\BRIGHT-Reproduction\BRIGHT'
@@ -154,7 +156,7 @@ outputs/paper9_splits/test_set_paper9.txt
 outputs/paper9_splits/paper9_split_manifest.json
 ```
 
-## 6. 真实数据训练烟测（现在应执行的下一步）
+## 6. 历史 9 事件真实数据训练烟测（不再是默认下一步）
 
 烟测复用未修改的官方 Dataset、augmentation、UNet 和 Lovasz，实现 2 次真实反向传播和 optimizer update；它只检查少量 train TIFF，完全不读取 val/test TIFF。
 
@@ -267,7 +269,7 @@ final_test/evaluation_report.json
 
 ## 12. 尚未解决、需人工确认
 
-- 最终目标究竟是 ESSD 正式版 14 事件 Table 5，还是单独研究历史 9 事件；两者应分别命名、分别训练。
+- 正式目标已经确定为 ESSD 正式版 14 事件 Table 5；本文件只保留历史 9 事件辅助轨道。
 - 官方 checkpoint 的实际训练 ID、split 哈希、seed、源码 commit 和是否使用 AMP 未公开。
 - 论文 `CE + Lovasz` 与代码 `CE + 0.75 Lovasz` 的差异无法从现有材料消解。
 - 论文没有明确 crop 大小、精确增强概率、验证频率、初始化、scheduler（代码无 scheduler）和随机种子。

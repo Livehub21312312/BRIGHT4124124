@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Create derived, read-only-filtered manifests for the historical 9 events.
+"""Create auxiliary manifests for the historical 9-event experiment.
 
 The official standard_ML files are only read.  Filtered copies and a provenance
-manifest are written to a separate output directory.
+manifest are written to a separate output directory.  This is not the default
+ESSD 2025 final-paper reproduction split, which uses all 14 events.
 """
 
 from __future__ import annotations
@@ -107,6 +108,7 @@ def main() -> int:
 
     manifest = {
         "status": "passed",
+        "experiment_role": "auxiliary_historical_nine_event_experiment",
         "scope_note": (
             "These are derived manifests for the historical nine-event subset, "
             "not the ESSD 2025 final 14-event standard split."

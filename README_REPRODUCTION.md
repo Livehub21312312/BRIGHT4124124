@@ -7,9 +7,10 @@
 > response*, Earth System Science Data, 17, 6217–6253, 2025.
 
 核查基准是官方仓库 `master` 的提交
-`59269142f3a3550320513e362692732f46486985`。论文参数来自仓库历史提交
-`75728ac` 中的 `BRIGHT_paper.pdf`，不是根据 README 猜测。本文档和烟测不修改
-原始网络、标签、官方划分或评价公式。
+`59269142f3a3550320513e362692732f46486985`。正式参数和指标以 ESSD 2025 最终版为准；
+仓库历史提交 `75728ac` 中的 `BRIGHT_paper.pdf` 仅用于审计早期版本差异。正式 14 事件
+训练协议见 `STRICT_STANDARD_ML_REPRODUCTION_PLAN.md`。本文档和烟测不修改原始网络、
+标签、官方划分或评价公式。
 
 ## 1. 官方源码位置与执行链路
 
@@ -63,57 +64,25 @@
 
 | 模型 | F1loc | F1clf | OA | mIoU | IoU: background/intact/damaged/destroyed |
 |---|---:|---:|---:|---:|---|
-| UNet | 89.19 | 54.69 | 94.73 | 59.74 | 96.16 / 69.84 / 17.64 / 55.32 |
+| UNet | 87.97 | 72.24 | 95.47 | 64.94 | 96.19 / 71.27 / 39.13 / 53.17 |
 
 `F1loc` 是背景/建筑二分类 F1；`F1clf` 是仅在真实建筑像素上计算的 intact、
 damaged、destroyed 三个 F1 的调和平均；OA、逐类 IoU 和 mIoU 使用完整四类图。
 
-## 3. 论文划分与当前划分
+## 3. ESSD 最终版正式划分与历史辅助划分
 
-论文描述按事件分别约 7:1:2 划分后合并。论文表 5 只对以下 9 个事件报告结果：
+ESSD 2025 最终版覆盖 14 个事件、4246 对影像，按事件分别约 7:1:2 后合并。当前
+官方 `standard_ML` 非空条目为 train/val/test = 2918/450/878，这三份原始列表是正式
+主复现的唯一划分来源。不要用 `wc -l` 统计没有末尾换行的文件，否则会各少算 1。
 
-`bata-explosion`、`beirut-explosion`、`congo-volcano`、`haiti-earthquake`、
-`hawaii-wildfire`、`la_palma-volcano`、`libya-flood`、`morocco-earthquake`、
-`turkey-earthquake`。
+当前列表已修正早期公开列表中的两个跨集合重复项，完整性检查确认三个集合当前互不
+重叠。训练只读取 train，checkpoint 选择只读取 val；全部设置和 best checkpoint 冻结
+前禁止读取 `test_set.txt`。官方训练脚本会每 500 步查看 test，因此不能直接作为严格
+训练入口。
 
-论文中的 Ukraine、Myanmar、Mexico 因灾前光学影像不能再分发而显示为 `–`。
-当前 `standard_ML` 列表还包含后来加入的 `noto-earthquake`、
-`marshall-wildfire`，以及需要用户自行准备光学数据的 Ukraine、Myanmar、Mexico，
-非空条目总数为 2918/450/878；直接使用它们不是论文表 4 的同一测试范围。不要用
-`wc -l` 统计这些没有末尾换行的文件，否则会各少算 1。
-
-更重要的是，仓库最早公开的论文期列表（提交 `c0032ed`）有两个跨集合重复项：
-`bata-explosion_00000049` 同时在 train/test，`libya-flood_00000024` 同时在
-train/val。当前列表已用 `bata-explosion_00000050` 和
-`libya-flood_00000034` 替换训练项，消除了泄漏；当前 9 事件子集计数为
-2229/349/661，三个集合互不重叠。
-
-因此推荐的主复现使用“当前官方无泄漏划分 + 论文 9 事件范围”，生成派生列表，
-但绝不覆盖官方列表：
-
-```bash
-cd /path/to/BRIGHT
-mkdir -p runs/essd-unet/splits
-for split in train val test; do
-  grep -Ev '^(marshall-wildfire|noto-earthquake|mexico-hurricane|myanmar-hurricane|ukraine-conflict)_' \
-    "bda_benchmark/dataset/splitname/standard_ML/${split}_set.txt" \
-    > "runs/essd-unet/splits/${split}_set.txt"
-done
-wc -l runs/essd-unet/splits/*.txt
-cat runs/essd-unet/splits/*.txt | sort | uniq -d  # 应为空
-```
-
-若研究目的是审计历史结果，可从 Git 历史导出旧列表并明确标注“含泄漏”，不可把
-它与推荐主结果混写：
-
-```bash
-git show c0032ed:dfc25_benchmark/dataset/splitname/train_setlevel.txt > runs/essd-unet/splits/train_historical.txt
-git show c0032ed:dfc25_benchmark/dataset/splitname/val_setlevel.txt > runs/essd-unet/splits/val_historical.txt
-git show c0032ed:dfc25_benchmark/dataset/splitname/holdout_setlevel.txt > runs/essd-unet/splits/test_historical.txt
-```
-
-这两个设置可能不会产生相同训练结果。论文没有提供足够信息判断内部训练最终使用了
-泄漏修正前还是修正后的两项，因此应同时保存 commit、列表 checksum 和实验标签。
+从当前列表筛出的 2229/349/661 九事件划分继续作为历史辅助实验保留，相关预测、报告、
+派生列表和工具不得删除，但不再是默认论文复现。详见
+`STRICT_PAPER9_REPRODUCTION_PLAN.md`。
 
 ## 4. 数据与模型权重
 
@@ -242,39 +211,13 @@ PYTHONDONTWRITEBYTECODE=1 python tools/smoke_test_unet.py
 
 随机初始化模型的 OA/mIoU 只用于证明评价流程能执行，不是实验指标，不应与论文比较。
 
-## 7. 论文对齐训练
+## 7. 正式训练前的真实数据烟测
 
-从仓库根目录执行：
-
-```bash
-mkdir -p runs/essd-unet/checkpoints
-cd bda_benchmark
-PYTHONPATH="$PWD" python script/standard_ML/train_UNet.py \
-  --dataset BRIGHT \
-  --train_batch_size 16 \
-  --eval_batch_size 4 \
-  --num_workers 16 \
-  --crop_size 640 \
-  --max_iters 800000 \
-  --learning_rate 1e-4 \
-  --weight_decay 5e-3 \
-  --model_type UNet \
-  --model_param_path ../runs/essd-unet/checkpoints \
-  --train_dataset_path "$DATASET_ROOT" \
-  --train_data_list_path ../runs/essd-unet/splits/train_set.txt \
-  --val_dataset_path "$DATASET_ROOT" \
-  --val_data_list_path ../runs/essd-unet/splits/val_set.txt \
-  --test_dataset_path "$DATASET_ROOT" \
-  --test_data_list_path ../runs/essd-unet/splits/test_set.txt
-```
-
-资源不足时可以减少 `num_workers`，但改变 batch size、crop size 或
-`max_iters / batch_size = 50000` 的优化器 step 数会形成不同实验。脚本没有 AMP、
-梯度累积、scheduler 或断点中的优化器状态；添加这些都必须另记为非官方变体。
-
-训练保存到带时间戳的目录，只有验证 mIoU 提升时写 `best_model.pth`。保存以下信息：
-Git commit、GPU/驱动/CUDA、Python/PyTorch/NumPy 版本、三个列表 checksum、数据记录
-版本/checksum、完整 stdout 和最终 checkpoint checksum。
+不要直接运行官方 `train_UNet.py`：它在训练阶段要求并反复读取 test。先按
+`STRICT_STANDARD_ML_REPRODUCTION_PLAN.md` 运行
+`tools/smoke_train_unet_standard_ml.py`，确认 14 事件官方 train/val、前向、代码损失、
+backward、参数更新和 4GB 峰值显存。烟测通过并确认采用真实 batch 16 或资源适配方案
+后，才实现不含 test 参数的独立正式 trainer。
 
 ## 8. 推理与评价
 
@@ -283,15 +226,14 @@ cd bda_benchmark
 PYTHONPATH="$PWD" python script/standard_ML/infer_UNet.py \
   --model_path ../runs/essd-unet/checkpoints/BRIGHT/<run>/best_model.pth \
   --test_dataset_path "$DATASET_ROOT" \
-  --test_data_list_path ../runs/essd-unet/splits/test_set.txt \
+  --test_data_list_path dataset/splitname/standard_ML/test_set.txt \
   --output_dir ../runs/essd-unet/inference
 ```
 
-控制台的 Overall Metrics 给出四类 OA、mIoU 和逐类 IoU。训练脚本还计算论文表中的
-F1loc 与 F1clf，但推理脚本当前没有打印它们；要对齐论文表 4，应保存训练脚本在最佳
-validation round 对应的 test 输出，或写独立只读评价包装器调用同一个 `Evaluator`。
-不要改变 `Evaluator` 公式，也不要把按事件 mIoU 的简单平均与全测试集混淆矩阵 mIoU
-混为一项。
+控制台的 Overall Metrics 给出四类 OA、mIoU 和逐类 IoU。正式复现使用已有独立只读
+包装器 `tools/evaluate_unet_testset.py` 输出 F1loc、F1clf、OA、mIoU、各类指标和
+混淆矩阵。只有 best checkpoint 和超参数冻结后才允许执行一次 878 样本评价；不要把
+训练期间的 test 输出用于选模，也不要改变 `Evaluator` 公式。
 
 ## 9. 常见错误
 
@@ -309,8 +251,8 @@ validation round 对应的 test 输出，或写独立只读评价包装器调用
   不能是 H×W×1；三类 TIFF 尺寸必须一致。
 - state-dict key 带 `module.`：下载了 DataParallel 或错误格式 checkpoint；先核对
   Zenodo 文件，不能静默丢弃 key。
-- 某事件指标为 `nan`：列表中没有该事件时，事件 evaluator 的混淆矩阵为空；只比较
-  实际包含样本的 9 个论文事件。
+- 某事件指标为 `nan`：列表中没有该事件时，事件 evaluator 的混淆矩阵为空；正式
+  standard_ML 测试应核对 14 个事件都存在。
 - `SyntaxWarning: "is" with a literal`：来自官方 `lovasz_loss.py` 中的历史写法；
   当前烟测仍可通过。严格基线复现保留该文件，代码清理应作为单独实验变更。
 
@@ -318,5 +260,5 @@ validation round 对应的 test 输出，或写独立只读评价包装器调用
 
 当前云实例没有 BRIGHT 真数据、官方 UNet 权重或 NVIDIA GPU，因此未执行：完整数据
 完整性/checksum 核验、50,000-step GPU 训练、官方 checkpoint 的全测试集推理，以及
-论文表 4 的数值对比。只有 CPU 合成小样本烟测可以在本环境中验证；其结果不得作为
-论文复现实验结果。
+论文 Table 5 的数值对比。只有不依赖真实数据/GPU 的静态检查可以在本环境中验证；
+其结果不得作为论文复现实验结果。
