@@ -131,9 +131,9 @@ optimizer_updates = 50000
 
 所以方案 B 的正确名称是“ESSD standard_ML 14 事件资源适配复现”，不得称为完全一致复现。
 
-## 7. 真实数据训练烟测
+## 7. 已完成的真实数据训练烟测
 
-烟测目标仅包括：官方 loader 能读取真实 TIFF、UNet 前向输出 `N×4×640×640`、CE 和 Lovasz 为有限值、backward 成功、AdamW update 后参数发生变化、CUDA 峰值被记录。
+烟测目标仅包括：官方 loader 能读取真实 TIFF、UNet 前向输出 `N×4×640×640`、CE 和 Lovasz 为有限值、backward 成功、AdamW update 后参数发生变化、CUDA 峰值被记录。该烟测现已由用户在 Windows 真实数据上完成：2 次 optimizer update 均成功，AMP、micro-batch 1、crop 640；单步观测约 0.752 秒，峰值 allocated/reserved 为 1,700,690,944 / 1,941,962,752 bytes，参数变化验证通过，test list 未访问。报告位于用户本地 `outputs/standard_ml_train_smoke/training_smoke_amp.json`，仓库环境未重复运行或伪造该结果。
 
 Windows PowerShell：
 
@@ -154,7 +154,7 @@ python .\tools\smoke_train_unet_standard_ml.py `
   --report '.\outputs\standard_ml_train_smoke\training_smoke_amp.json'
 ```
 
-建议先用 AMP 确认训练链路，再去掉 `--amp` 做一次 FP32 显存探测。两次报告放在不同文件名，避免覆盖，例如 `training_smoke_amp.json` 和 `training_smoke_fp32.json`。
+该命令保留为复核入口。若再做 FP32 显存探测，应去掉 `--amp` 并使用不同报告名，不能覆盖已通过的 AMP 报告。
 
 成功标准：
 
@@ -168,9 +168,11 @@ python .\tools\smoke_train_unet_standard_ml.py `
 
 烟测每个 micro-batch 都立即 update，不模拟 accumulation 16；它只能证明训练链路可用，loss 和速度不是正式实验结果。
 
-## 8. 烟测通过后的正式 trainer 验收条件
+## 8. 烟测通过后的 50-update 短程试训练
 
-收到人工确认后才实现/启动正式 trainer。最低要求：
+独立工具 `tools/train_unet_standard_ml_short.py` 已按 `SHORT_STANDARD_ML_TRAINING.md` 准备；默认只读取 train list，执行 50 次 micro-batch 1 即时更新，记录逐步 loss/耗时/显存，保存 model/optimizer/AMP scaler/RNG/样本顺序，并在结束后用新对象严格验证恢复。当前云环境没有真实数据和 CUDA，未执行这 50 步。
+
+50 步通过后，正式 trainer 的最低要求仍是：
 
 1. 固定读取官方 train/val；命令行和配置中不存在 test-list 参数。
 2. 显式终止于 50000 optimizer updates，并记录 micro steps、samples seen 和有效 batch。
@@ -221,6 +223,6 @@ final_test/evaluation_report.json
 - 论文公式 `CE + Lovasz` 与当前源码 `CE + 0.75 Lovasz` 无法从公开材料进一步消解。
 - 论文没有明确 crop 数值、增强概率、验证频率、seed、初始化和 checkpoint 内部格式；这些细节来自代码/README或仍未知。
 - 官方发布 checkpoint 不含训练 ID、split 哈希、seed 或源码 commit，不能作为本次独立训练的可验证 provenance。
-- 4GB 上 FP32/AMP micro-batch 1 的真实训练峰值尚未测量。
+- 4GB 上 AMP micro-batch 1 的两步峰值已经测量；50 步稳定峰值和耗时尚待本地运行。FP32 峰值仍未测量。
 - 尚未决定烟测后使用更大 GPU 的真实 batch 16，还是接受带 BatchNorm/AMP 差异的资源适配方案。
-- 独立正式 trainer 尚未实现；必须在烟测结果和资源路线确认后再实现，当前不能启动完整训练。
+- 50-update 诊断工具已经实现，但独立正式 trainer 尚未实现；必须等待短程报告和资源路线确认，当前不能启动完整训练。
