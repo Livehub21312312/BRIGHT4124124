@@ -211,23 +211,29 @@ def validate_args(args: argparse.Namespace, device: torch.device) -> None:
             raise ValueError(f"--{name.replace('_', '-')} must be positive")
     if args.learning_rate <= 0 or args.weight_decay < 0:
         raise ValueError("Invalid learning rate/weight decay")
-    effective_batch = args.micro_batch_size * args.gradient_accumulation_steps
-    if args.sample_exposures % effective_batch:
+    if args.sample_exposures % args.micro_batch_size:
         raise ValueError(
             f"sample exposures {args.sample_exposures} must be divisible by "
-            f"effective batch {effective_batch} so checkpoints align with updates"
-        )
-    if args.sample_exposures != TOTAL_SAMPLE_EXPOSURES:
-        raise ValueError(
-            "This formal configuration is fixed to the official 800000 sample "
-            "exposures; use a separate controlled configuration for other budgets"
+            f"micro-batch size {args.micro_batch_size}; partial accumulation "
+            "groups are supported, but partial data batches are not"
         )
     if args.amp and device.type != "cuda":
         raise ValueError("AMP requires CUDA; use --no-amp for CPU/FP32")
 
 
 def critical_config(args: argparse.Namespace, amp_enabled: bool) -> dict[str, Any]:
+    full_budget = args.sample_exposures == TOTAL_SAMPLE_EXPOSURES
     return {
+        "experiment_mode": (
+            "official_full_exposure_budget_resource_adapted"
+            if full_budget
+            else "reduced_budget_resource_adapted_not_full_paper_reproduction"
+        ),
+        "paper_reproduction_status": (
+            "full_exposure_budget_but_resource_adapted_not_exact_reproduction"
+            if full_budget
+            else "reduced_exposure_budget_not_full_paper_reproduction"
+        ),
         "dataset_root": str(args.dataset_root.resolve()),
         "requested_device": args.device,
         "sample_exposures": args.sample_exposures,
@@ -235,6 +241,10 @@ def critical_config(args: argparse.Namespace, amp_enabled: bool) -> dict[str, An
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "effective_batch_size": args.micro_batch_size
         * args.gradient_accumulation_steps,
+        "planned_optimizer_update_attempts": math.ceil(
+            args.sample_exposures
+            / (args.micro_batch_size * args.gradient_accumulation_steps)
+        ),
         "crop_size": args.crop_size,
         "optimizer": "AdamW",
         "learning_rate": args.learning_rate,
@@ -464,6 +474,15 @@ def safe_grad_diagnostics(model: torch.nn.Module) -> dict[str, Any]:
     return {"all_finite": not bad, "non_finite_parameters": bad}
 
 
+def normalize_accumulated_gradients(model: torch.nn.Module, divisor: int) -> None:
+    """Average accumulated per-microbatch mean gradients, including a short tail."""
+    if divisor < 1:
+        raise ValueError("Gradient normalization divisor must be positive")
+    for parameter in model.parameters():
+        if parameter.grad is not None:
+            parameter.grad.div_(divisor)
+
+
 def save_raw_state_dict(model: torch.nn.Module, path: Path) -> None:
     atomic_torch_save(model.state_dict(), path)
 
@@ -596,10 +615,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     state.setdefault("peak_reserved_bytes", 0)
     if state["samples_seen"] > args.sample_exposures:
         raise ValueError("Checkpoint sample cursor exceeds the configured budget")
-    if state["samples_seen"] % (
-        args.micro_batch_size * args.gradient_accumulation_steps
-    ):
-        raise ValueError("Checkpoint cursor is not at an accumulation boundary")
+    if state["samples_seen"] % args.micro_batch_size:
+        raise ValueError("Checkpoint cursor is not at a micro-batch boundary")
     elapsed_before_run = float(state["elapsed_training_seconds"])
 
     sampler = ResumableRandomSampler(
@@ -653,8 +670,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 }
                 inputs = torch.cat([pre, post], dim=1).to(device)
                 labels_clf = labels_clf.to(device).long()
+                actual_batch_size = len(sample_ids)
                 expected_input = (
-                    args.micro_batch_size,
+                    actual_batch_size,
                     6,
                     args.crop_size,
                     args.crop_size,
@@ -676,7 +694,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     active_step_context["stage"] = "autocast_forward_and_loss"
                     logits = model(inputs)
                     if tuple(logits.shape) != (
-                        args.micro_batch_size,
+                        actual_batch_size,
                         4,
                         args.crop_size,
                         args.crop_size,
@@ -705,9 +723,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         "optimizer update"
                     )
                 active_step_context["stage"] = "backward"
-                scaler.scale(
-                    total_loss / args.gradient_accumulation_steps
-                ).backward()
+                scaler.scale(total_loss).backward()
                 pending_micro_steps += 1
                 record: dict[str, Any] = {
                     "micro_step": state["micro_steps"],
@@ -726,9 +742,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     "micro_step_seconds_including_data_and_backward": None,
                 }
 
-                if pending_micro_steps == args.gradient_accumulation_steps:
+                is_budget_end = state["samples_seen"] >= args.sample_exposures
+                if (
+                    pending_micro_steps == args.gradient_accumulation_steps
+                    or is_budget_end
+                ):
                     if amp_enabled:
                         scaler.unscale_(optimizer)
+                    normalize_accumulated_gradients(model, pending_micro_steps)
                     scale_before = float(scaler.get_scale()) if amp_enabled else 1.0
                     active_step_context["grad_scaler_scale_before_step"] = scale_before
                     active_step_context["stage"] = "optimizer_step_and_scaler_update"
@@ -977,6 +998,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         report = {
             "status": "completed_sample_exposure_budget",
             "paper_result": False,
+            "experiment_mode": config["experiment_mode"],
+            "paper_reproduction_status": config["paper_reproduction_status"],
             "experiment_role": "ESSD standard_ML 14-event resource-adapted training",
             "configuration": config,
             "data_access": {

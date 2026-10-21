@@ -2,7 +2,7 @@
 
 ## 目标与实现
 
-本脚本按官方 `standard_ML` 训练列表运行 14 事件 UNet。清单数量固定校验为 train 2918、val 450；训练清单扩展至 800,000 次样本曝光，对应 batch 16 时 50,000 次 optimizer update。验证每 500 次成功更新进行一次，只按官方 `Evaluator` 的 mIoU 选择 best。训练脚本没有 test-list 参数，也不会读取 test manifest。
+本脚本按官方 `standard_ML` 训练列表运行 14 事件 UNet。清单数量固定校验为 train 2918、val 450；默认预算仍为 800,000 次样本曝光，对应 batch 16 时 50,000 次 optimizer update。也支持明确标记为缩减预算资源适配实验的 180,000 次曝光，对应 micro-batch 1 / 累积 16 时 11,250 次更新。`sample exposure` 指从 Dataset 取出并完成一次训练前向/反向的样本数；Dataset 按官方 `max_iters` 逻辑重复 train ID 至指定长度，再由 sampler 洗牌。验证每 500 次成功更新进行一次，只按官方 `Evaluator` 的 mIoU 选择 best。训练脚本没有 test-list 参数，也不会读取 test manifest。
 
 固定保留官方 `UNet(6,4)`、AdamW、learning rate `1e-4`、weight decay `0.005`、crop 640、官方增强，以及源码实际的 `CE + 0.75 × lovasz_softmax`。不使用 scheduler。
 
@@ -19,6 +19,8 @@
 - 官方 Lovasz 实现以当前 batch 展平像素。micro-batch 1 下分别计算 16 个单样本 Lovasz 并平均梯度，不等于在一个 batch 16 上统一计算 Lovasz。函数与权重系数保留，但批内聚合口径改变。
 - 用户指定的 seed 1337 用于确定性续训；论文未报告该 seed。
 - AMP 溢出会消耗这部分样本曝光预算但跳过 optimizer update。因此训练以 800,000 次曝光为停止条件，溢出时成功更新数可能略少于 50,000；报告会同时记录曝光数、尝试次数、成功更新和跳过数。
+- 非整除预算的最后一个 accumulation group 会在预算边界提交一次较小的 optimizer update；其梯度按该组实际 micro-batch 数取平均，而不是丢弃尾部曝光。预算必须是 micro-batch size 的整数倍，以避免 Dataset 返回不完整 data batch。180,000 可以被 16 整除，因此默认设置下为 11,250 个完整更新。
+- `experiment_mode` / `paper_reproduction_status` 会写入配置、checkpoint 和训练报告。180,000 预算明确标记为 `reduced_budget_resource_adapted_not_full_paper_reproduction`，不得作为完整论文训练结果。
 
 ## Windows 环境
 
@@ -104,6 +106,30 @@ python .\tools\train_unet_standard_ml.py `
 ```
 
 训练配置和 train/val manifest hash 必须与 checkpoint 一致。一般进程中断会丢失最近一个 checkpoint 后尚未保存的工作量，最多约 499 次 update attempt。若因连续 AMP 溢出或非有限 loss 停止，先查看 `failure_report.json` 和末尾日志；不要仅为继续而提高阈值或忽略异常。坏 loss 尚未完成的 accumulation 不保存，续训会从最近完整 checkpoint 位置重新读取。
+
+## 180,000 曝光的一天版资源适配训练
+
+这是同一官方 14 事件 standard_ML 训练列表上的缩减预算实验，不是完整论文复现。180,000 表示 180,000 个训练样本曝光，不是 optimizer update 数；micro-batch 1、累积 16 时目标为 11,250 次更新。独立输出目录可避免与 800,000 曝光运行的日志、checkpoint 或最佳模型混淆：
+
+```powershell
+python .\tools\train_unet_standard_ml.py `
+  --dataset-root 'D:\BRIGHT-Reproduction\data' `
+  --output-dir '.\outputs\standard_ml_unet_180k_resource_adapted' `
+  --device cuda `
+  --sample-exposures 180000 `
+  --micro-batch-size 1 `
+  --gradient-accumulation-steps 16 `
+  --crop-size 640 `
+  --learning-rate 0.0001 `
+  --weight-decay 0.005 `
+  --validation-every-updates 500 `
+  --checkpoint-every-updates 500 `
+  --max-consecutive-amp-skips 8 `
+  --seed 1337 `
+  --amp
+```
+
+该 run 的断点续训请使用同一输出目录、相同参数并加 `--resume '.\outputs\standard_ml_unet_180k_resource_adapted\latest.pt'`。只在验证集选 checkpoint；测试清单与测试影像不参与这次训练。
 
 ## 训练结束后的测试集评价
 
