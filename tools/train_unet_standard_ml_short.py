@@ -66,6 +66,7 @@ EXPECTED_EVENTS = {
     "ukraine-conflict",
 }
 CHECKPOINT_FORMAT_VERSION = 1
+ACTIVE_FAILURE_CONTEXT: dict[str, Any] = {}
 
 
 class FixedOrderSampler(Sampler[int]):
@@ -234,6 +235,22 @@ def finite_float(value: float, name: str) -> float:
     if not math.isfinite(result):
         raise FloatingPointError(f"Non-finite {name}: {result}")
     return result
+
+
+def json_float_or_none(value: float) -> float | None:
+    value = float(value)
+    return value if math.isfinite(value) else None
+
+
+def non_finite_kind(value: float) -> str | None:
+    value = float(value)
+    if math.isnan(value):
+        return "nan"
+    if value == math.inf:
+        return "+inf"
+    if value == -math.inf:
+        return "-inf"
+    return None
 
 
 def torch_load_full(path: Path, map_location: str | torch.device) -> Any:
@@ -479,6 +496,7 @@ def ensure_new_output_is_safe(args: argparse.Namespace) -> None:
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
+    ACTIVE_FAILURE_CONTEXT.clear()
     invocation_started = time.perf_counter()
     device = resolve_device(args.device)
     validate_args(args, device)
@@ -572,6 +590,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             batch = next(loader_iterator)
             data_seconds = time.perf_counter() - cycle_started
             pre, post, _labels_loc, labels_clf, sample_ids = batch
+            ACTIVE_FAILURE_CONTEXT.clear()
+            ACTIVE_FAILURE_CONTEXT.update(
+                {
+                    "attempted_optimizer_update": completed_updates + 1,
+                    "sample_ids": list(sample_ids),
+                    "events": [event_for_sample(sample_id) for sample_id in sample_ids],
+                    "stage": "input_validation_before_forward",
+                    "optimizer_step_reached": False,
+                    "scaler_update_reached": False,
+                }
+            )
 
             if device.type == "cuda":
                 torch.cuda.reset_peak_memory_stats(device)
@@ -597,6 +626,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 raise ValueError(f"Invalid label values: {invalid_labels}")
 
             optimizer.zero_grad(set_to_none=True)
+            ACTIVE_FAILURE_CONTEXT["stage"] = "autocast_forward_and_loss"
             with torch.cuda.amp.autocast(enabled=use_amp):
                 logits = model(inputs)
                 expected_output = (
@@ -610,22 +640,105 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         f"Unexpected output shape {tuple(logits.shape)}; "
                         f"expected {expected_output}"
                     )
-                if not torch.isfinite(logits).all():
+                logits_finite = bool(torch.isfinite(logits).all().item())
+                if not logits_finite:
+                    ACTIVE_FAILURE_CONTEXT["logits"] = {
+                        "dtype": str(logits.dtype),
+                        "finite": False,
+                        "nan_count": int(torch.isnan(logits).sum().item()),
+                        "positive_inf_count": int(torch.isposinf(logits).sum().item()),
+                        "negative_inf_count": int(torch.isneginf(logits).sum().item()),
+                    }
                     raise FloatingPointError("Model output contains NaN or infinity")
+                ACTIVE_FAILURE_CONTEXT["logits"] = {
+                    "dtype": str(logits.dtype),
+                    "finite": True,
+                    "minimum": float(logits.detach().float().min().item()),
+                    "maximum": float(logits.detach().float().max().item()),
+                }
                 ce_loss = F.cross_entropy(logits, labels_clf)
                 lovasz_loss = L.lovasz_softmax(
                     F.softmax(logits, dim=1), labels_clf, ignore=255
                 )
                 total_loss = ce_loss + 0.75 * lovasz_loss
 
-            finite_float(total_loss.detach().item(), "total loss")
+            raw_ce = float(ce_loss.detach().item())
+            raw_lovasz = float(lovasz_loss.detach().item())
+            raw_total = float(total_loss.detach().item())
+            ACTIVE_FAILURE_CONTEXT["losses"] = {
+                "ce": json_float_or_none(raw_ce),
+                "lovasz": json_float_or_none(raw_lovasz),
+                "weighted_lovasz": json_float_or_none(0.75 * raw_lovasz),
+                "total": json_float_or_none(raw_total),
+                "ce_finite": math.isfinite(raw_ce),
+                "lovasz_finite": math.isfinite(raw_lovasz),
+                "total_finite": math.isfinite(raw_total),
+                "ce_non_finite_kind": non_finite_kind(raw_ce),
+                "lovasz_non_finite_kind": non_finite_kind(raw_lovasz),
+                "total_non_finite_kind": non_finite_kind(raw_total),
+            }
+            finite_float(raw_ce, "CE loss")
+            finite_float(raw_lovasz, "Lovasz loss")
+            finite_float(raw_total, "total loss")
+            ACTIVE_FAILURE_CONTEXT["losses"]["all_finite"] = True
+            scaler_scale_before = float(scaler.get_scale()) if use_amp else 1.0
+            ACTIVE_FAILURE_CONTEXT["grad_scaler"] = {
+                "enabled": use_amp,
+                "scale_before_backward": scaler_scale_before,
+                "scale_after_unscale_before_update": None,
+            }
+            ACTIVE_FAILURE_CONTEXT["stage"] = "scaled_backward"
             scaler.scale(total_loss).backward()
+            ACTIVE_FAILURE_CONTEXT["stage"] = "scaler_unscale"
             scaler.unscale_(optimizer)
+            ACTIVE_FAILURE_CONTEXT["grad_scaler"][
+                "scale_after_unscale_before_update"
+            ] = float(scaler.get_scale()) if use_amp else 1.0
+            ACTIVE_FAILURE_CONTEXT["stage"] = (
+                "gradient_check_after_scaler_unscale_before_scaler_step"
+            )
+            gradient_diagnostics: dict[str, Any] = {}
             for name, parameter in model.named_parameters():
-                if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
-                    raise FloatingPointError(f"Non-finite gradient in parameter {name}")
+                if parameter.grad is None:
+                    continue
+                finite_mask = torch.isfinite(parameter.grad)
+                if not bool(finite_mask.all().item()):
+                    gradient = parameter.grad.detach()
+                    gradient_diagnostics[name] = {
+                        "numel": gradient.numel(),
+                        "finite_count": int(finite_mask.sum().item()),
+                        "nan_count": int(torch.isnan(gradient).sum().item()),
+                        "positive_inf_count": int(
+                            torch.isposinf(gradient).sum().item()
+                        ),
+                        "negative_inf_count": int(
+                            torch.isneginf(gradient).sum().item()
+                        ),
+                        "finite_abs_max": (
+                            float(gradient[finite_mask].abs().max().item())
+                            if bool(finite_mask.any().item())
+                            else None
+                        ),
+                    }
+                    ACTIVE_FAILURE_CONTEXT["gradient_diagnostics"] = (
+                        gradient_diagnostics
+                    )
+                    raise FloatingPointError(
+                        f"Non-finite gradient in parameter {name}"
+                    )
+            ACTIVE_FAILURE_CONTEXT["gradient_diagnostics"] = {
+                "all_gradients_finite": True,
+                "parameters_with_gradients": sum(
+                    parameter.grad is not None for parameter in model.parameters()
+                ),
+            }
+            ACTIVE_FAILURE_CONTEXT["stage"] = "scaler_step"
             scaler.step(optimizer)
+            ACTIVE_FAILURE_CONTEXT["optimizer_step_reached"] = True
+            ACTIVE_FAILURE_CONTEXT["stage"] = "scaler_update"
             scaler.update()
+            ACTIVE_FAILURE_CONTEXT["scaler_update_reached"] = True
+            scaler_scale_after = float(scaler.get_scale()) if use_amp else 1.0
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             compute_seconds = time.perf_counter() - compute_started
@@ -660,6 +773,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "total_loss_ce_plus_0_75_lovasz": finite_float(
                     total_loss.detach().item(), "total loss"
                 ),
+                "gradients_finite_after_unscale": True,
+                "grad_scaler_scale_before_backward": scaler_scale_before,
+                "grad_scaler_scale_after_update": scaler_scale_after,
                 "data_seconds": data_seconds,
                 "compute_seconds": compute_seconds,
                 "cycle_seconds": cycle_seconds,
@@ -828,6 +944,7 @@ def failure_report(args: argparse.Namespace, error: BaseException) -> dict[str, 
         "stopped_without_continuing": True,
         "cuda_memory_at_failure": memory,
         "traceback": traceback.format_exc().splitlines(),
+        "failing_step_context": dict(ACTIVE_FAILURE_CONTEXT),
     }
 
 
