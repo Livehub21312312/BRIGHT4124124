@@ -219,15 +219,29 @@ def validate_args(args: argparse.Namespace, device: torch.device) -> None:
         )
     if args.amp and device.type != "cuda":
         raise ValueError("AMP requires CUDA; use --no-amp for CPU/FP32")
+    class_weights = getattr(args, "class_weights", None)
+    if class_weights is not None and (
+        len(class_weights) != 4
+        or not all(math.isfinite(float(value)) and float(value) > 0 for value in class_weights)
+    ):
+        raise ValueError("class_weights must contain four finite positive values")
+    milestones = getattr(args, "validation_sample_exposures", [])
+    if milestones != sorted(set(milestones)) or any(
+        value <= 0 or value > args.sample_exposures for value in milestones
+    ):
+        raise ValueError("validation_sample_exposures must be unique increasing values within budget")
 
 
 def critical_config(args: argparse.Namespace, amp_enabled: bool) -> dict[str, Any]:
     full_budget = args.sample_exposures == TOTAL_SAMPLE_EXPOSURES
+    initial_checkpoint = getattr(args, "initial_checkpoint", None)
     return {
-        "experiment_mode": (
+        "experiment_mode": getattr(
+            args,
+            "experiment_mode",
             "official_full_exposure_budget_resource_adapted"
             if full_budget
-            else "reduced_budget_resource_adapted_not_full_paper_reproduction"
+            else "reduced_budget_resource_adapted_not_full_paper_reproduction",
         ),
         "paper_reproduction_status": (
             "full_exposure_budget_but_resource_adapted_not_exact_reproduction"
@@ -237,6 +251,14 @@ def critical_config(args: argparse.Namespace, amp_enabled: bool) -> dict[str, An
         "dataset_root": str(args.dataset_root.resolve()),
         "requested_device": args.device,
         "sample_exposures": args.sample_exposures,
+        "initial_checkpoint": (
+            str(Path(initial_checkpoint).resolve()) if initial_checkpoint else None
+        ),
+        "initial_checkpoint_sha256": (
+            sha256_file(Path(initial_checkpoint))
+            if initial_checkpoint and Path(initial_checkpoint).is_file()
+            else None
+        ),
         "micro_batch_size": args.micro_batch_size,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
         "effective_batch_size": args.micro_batch_size
@@ -250,9 +272,18 @@ def critical_config(args: argparse.Namespace, amp_enabled: bool) -> dict[str, An
         "learning_rate": args.learning_rate,
         "weight_decay": args.weight_decay,
         "scheduler": None,
-        "loss": "cross_entropy + 0.75 * official lovasz_softmax",
+        "loss": (
+            "weighted_cross_entropy(class_weights) + 0.75 * official lovasz_softmax"
+            if getattr(args, "class_weights", None) is not None
+            else "cross_entropy + 0.75 * official lovasz_softmax"
+        ),
+        "class_weights": getattr(args, "class_weights", None),
+        "class_weight_metadata": getattr(args, "class_weight_metadata", None),
         "amp": amp_enabled,
         "validation_every_successful_updates": args.validation_every_updates,
+        "validation_sample_exposure_milestones": getattr(
+            args, "validation_sample_exposures", []
+        ),
         "checkpoint_every_update_attempts": args.checkpoint_every_updates,
         "max_consecutive_amp_skips": args.max_consecutive_amp_skips,
         "seed": args.seed,
@@ -341,6 +372,12 @@ def metrics_from_evaluators(
         oa = evaluator_total.Pixel_Accuracy()
         class_iou = evaluator_total.Intersection_over_Union()
         miou = evaluator_total.Mean_Intersection_over_Union()
+        tp, fn, fp = evaluator_clf.calculate_per_class_metrics()
+        damage_precision = tp / (tp + fp + 1e-7)
+        damage_recall = tp / (tp + fn + 1e-7)
+    target_counts = evaluator_total.confusion_matrix.sum(axis=1)
+    prediction_counts = evaluator_total.confusion_matrix.sum(axis=0)
+    valid_pixels = int(target_counts.sum())
     return {
         "f1loc": finite_number(loc_f1),
         "f1clf_harmonic_mean": finite_number(clf_f1),
@@ -350,6 +387,34 @@ def metrics_from_evaluators(
             "intact": finite_number(damage_f1[0]),
             "damaged": finite_number(damage_f1[1]),
             "destroyed": finite_number(damage_f1[2]),
+        },
+        "per_class_precision_damage_only": {
+            "intact": finite_number(damage_precision[0]),
+            "damaged": finite_number(damage_precision[1]),
+            "destroyed": finite_number(damage_precision[2]),
+        },
+        "per_class_recall_damage_only": {
+            "intact": finite_number(damage_recall[0]),
+            "damaged": finite_number(damage_recall[1]),
+            "destroyed": finite_number(damage_recall[2]),
+        },
+        "ground_truth_pixel_counts": {
+            name: int(target_counts[index])
+            for index, name in enumerate(("background", "intact", "damaged", "destroyed"))
+        },
+        "prediction_pixel_counts": {
+            name: int(prediction_counts[index])
+            for index, name in enumerate(("background", "intact", "damaged", "destroyed"))
+        },
+        "pixel_distribution_percent": {
+            "ground_truth": {
+                name: (float(target_counts[index] / valid_pixels * 100) if valid_pixels else None)
+                for index, name in enumerate(("background", "intact", "damaged", "destroyed"))
+            },
+            "prediction": {
+                name: (float(prediction_counts[index] / valid_pixels * 100) if valid_pixels else None)
+                for index, name in enumerate(("background", "intact", "damaged", "destroyed"))
+            },
         },
         "per_class_iou": {
             "background": finite_number(class_iou[0]),
@@ -561,9 +626,24 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         atomic_write_json(config_path, config)
     if not hashes_path.exists():
         atomic_write_json(hashes_path, hashes_document)
+    class_weight_metadata = getattr(args, "class_weight_metadata", None)
+    if class_weight_metadata is not None:
+        class_weights_path = args.output_dir / "class_weights.json"
+        if not class_weights_path.exists():
+            atomic_write_json(class_weights_path, class_weight_metadata)
 
     set_seed(args.seed)
     model = UNet(in_channels=6, num_classes=4).to(device)
+    initial_checkpoint = getattr(args, "initial_checkpoint", None)
+    if initial_checkpoint and not args.resume:
+        initial_path = Path(initial_checkpoint)
+        payload = torch_load_full(initial_path)
+        if not isinstance(payload, dict) or not all(
+            isinstance(key, str) and isinstance(value, torch.Tensor)
+            for key, value in payload.items()
+        ):
+            raise TypeError("Initial checkpoint must be a raw state_dict mapping")
+        model.load_state_dict(payload, strict=True)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.learning_rate, weight_decay=args.weight_decay
     )
@@ -611,6 +691,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "validation_history": [],
     }
     state.setdefault("last_validation_samples_seen", 0)
+    state.setdefault("validated_sample_exposures", [])
     state.setdefault("peak_allocated_bytes", 0)
     state.setdefault("peak_reserved_bytes", 0)
     if state["samples_seen"] > args.sample_exposures:
@@ -647,10 +728,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             config=config,
             split_hashes=split_hashes,
         )
-    log_path = args.output_dir / "train.jsonl"
-    validation_log_path = args.output_dir / "validation.jsonl"
+    log_path = args.output_dir / getattr(args, "training_log_filename", "train.jsonl")
+    validation_log_path = args.output_dir / getattr(
+        args, "validation_log_filename", "validation.jsonl"
+    )
     log_mode = "a" if args.resume else "w"
     optimizer.zero_grad(set_to_none=True)
+    class_weights = getattr(args, "class_weights", None)
+    ce_weight_tensor = (
+        torch.as_tensor(class_weights, dtype=torch.float32, device=device)
+        if class_weights is not None
+        else None
+    )
     pending_micro_steps = 0
     started = time.perf_counter()
     active_step_context: dict[str, Any] = {}
@@ -700,7 +789,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         args.crop_size,
                     ):
                         raise ValueError(f"Unexpected output shape: {tuple(logits.shape)}")
-                    ce_loss = F.cross_entropy(logits, labels_clf)
+                    ce_loss = F.cross_entropy(
+                        logits, labels_clf, weight=ce_weight_tensor
+                    )
                     lovasz_loss = lovasz_softmax(
                         F.softmax(logits, dim=1), labels_clf, ignore=255
                     )
@@ -853,14 +944,24 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                             "GradScaler-skipped updates; latest.pt is resumable"
                         )
 
-                    if (
+                    validation_milestones = getattr(
+                        args, "validation_sample_exposures", []
+                    )
+                    due_milestones = [
+                        milestone
+                        for milestone in validation_milestones
+                        if milestone <= state["samples_seen"]
+                        and milestone not in state["validated_sample_exposures"]
+                    ]
+                    regular_validation_due = (
                         state["successful_optimizer_updates"] > 0
                         and state["last_validation_update"]
                         < state["successful_optimizer_updates"]
                         and state["successful_optimizer_updates"]
                         % args.validation_every_updates
                         == 0
-                    ):
+                    )
+                    if due_milestones or regular_validation_due:
                         val_metrics = evaluate_validation(
                             model=model,
                             dataset_root=args.dataset_root,
@@ -871,6 +972,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         val_metrics["optimizer_update"] = state[
                             "successful_optimizer_updates"
                         ]
+                        val_metrics["samples_seen"] = state["samples_seen"]
+                        val_metrics["requested_sample_exposure_milestones"] = due_milestones
+                        state["validated_sample_exposures"].extend(due_milestones)
                         state["last_validation_update"] = state[
                             "successful_optimizer_updates"
                         ]
@@ -994,13 +1098,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             config=config,
             split_hashes=split_hashes,
         )
+        if getattr(args, "save_final_checkpoint", False):
+            save_full_checkpoint(
+                args.output_dir / "final.pt",
+                model=model,
+                optimizer=optimizer,
+                scaler=scaler,
+                state=state,
+                config=config,
+                split_hashes=split_hashes,
+            )
         times = state["step_time_seconds"]
         report = {
             "status": "completed_sample_exposure_budget",
             "paper_result": False,
             "experiment_mode": config["experiment_mode"],
             "paper_reproduction_status": config["paper_reproduction_status"],
-            "experiment_role": "ESSD standard_ML 14-event resource-adapted training",
+            "experiment_role": config["experiment_mode"],
             "configuration": config,
             "data_access": {
                 "train_list": str(TRAIN_LIST.resolve()),
@@ -1038,7 +1152,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             },
             "best_checkpoint": str((args.output_dir / "best_model.pth").resolve()),
         }
-        atomic_write_json(args.output_dir / "training_report.json", report)
+        atomic_write_json(
+            args.output_dir / getattr(args, "report_filename", "training_report.json"),
+            report,
+        )
         return report
     except Exception as error:
         if pending_micro_steps:
