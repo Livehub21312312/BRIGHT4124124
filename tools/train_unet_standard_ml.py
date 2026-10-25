@@ -1000,6 +1000,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                                 config=config,
                                 split_hashes=split_hashes,
                             )
+                        if getattr(args, "save_latest_at_validation", False):
+                            state["elapsed_training_seconds"] = (
+                                elapsed_before_run + time.perf_counter() - started
+                            )
+                            save_full_checkpoint(
+                                args.output_dir / "latest.pt",
+                                model=model,
+                                optimizer=optimizer,
+                                scaler=scaler,
+                                state=state,
+                                config=config,
+                                split_hashes=split_hashes,
+                            )
                         print(
                             "validation "
                             f"update={state['successful_optimizer_updates']} "
@@ -1078,6 +1091,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 save_raw_state_dict(model, args.output_dir / "best_model.pth")
                 save_full_checkpoint(
                     args.output_dir / "best_training_state.pt",
+                    model=model,
+                    optimizer=optimizer,
+                    scaler=scaler,
+                    state=state,
+                    config=config,
+                    split_hashes=split_hashes,
+                )
+            if getattr(args, "save_latest_at_validation", False):
+                state["elapsed_training_seconds"] = (
+                    elapsed_before_run + time.perf_counter() - started
+                )
+                save_full_checkpoint(
+                    args.output_dir / "latest.pt",
                     model=model,
                     optimizer=optimizer,
                     scaler=scaler,

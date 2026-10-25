@@ -206,6 +206,7 @@ def build_engine_args(
         validation_log_filename="validation_report.jsonl",
         report_filename="experiment_report.json",
         save_final_checkpoint=True,
+        save_latest_at_validation=True,
     )
 
 

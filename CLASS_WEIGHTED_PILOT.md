@@ -59,6 +59,7 @@ python .\tools\train_unet_class_weighted_pilot.py `
 ```
 
 恢复会核验类别权重、训练/验证清单 hash、配置及初始 checkpoint hash，并还原 optimizer、GradScaler、RNG 和曝光游标。不要更改数据、权重或其他参数后沿用旧 checkpoint。
+本 pilot 还会在每个验证节点刷新 `latest.pt`，避免中断后从较早的周期 checkpoint 重复走过验证阶段。
 
 ## 常见停止情况
 
